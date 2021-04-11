@@ -1,0 +1,205 @@
+import numpy as np
+from matplotlib import pyplot as plt
+import scipy.io.wavfile as wav
+from numpy.lib import stride_tricks
+from scipy.signal import find_peaks
+
+""" short time fourier transform of audio signal """
+def stft(sig, frameSize, overlapFac=0.5, window=np.hanning):
+    win = window(frameSize) #taking window of Size declared before
+    hopSize = int(frameSize - np.floor(overlapFac * frameSize))
+
+    # zeros at beginning (thus center of 1st window should be for sample nr. 0)
+    samples = np.append(np.zeros(int(np.floor(frameSize/2.0))), sig)
+    # cols for windowing
+    cols = np.ceil((len(samples) - frameSize) / float(hopSize)) + 1
+    # zeros at end (thus samples can be fully covered by frames)
+    samples = np.append(samples, np.zeros(frameSize))
+
+    frames = stride_tricks.as_strided(samples, shape=(int(cols), frameSize), strides=(samples.strides[0]*hopSize, samples.strides[0])).copy()
+    frames *= win
+
+    return np.fft.rfft(frames)
+
+""" scale frequency axis logarithmically """
+def logscale_spec(spec, sr=44100, factor=20.):
+    timebins, freqbins = np.shape(spec)
+
+    scale = np.linspace(0, 1, freqbins) ** factor
+    scale *= (freqbins-1)/max(scale)
+    scale = np.unique(np.round(scale))
+
+    # create spectrogram with new freq bins
+    newspec = np.complex128(np.zeros([timebins, len(scale)]))
+    for i in range(0, len(scale)):
+        if i == len(scale)-1:
+            newspec[:,i] = np.sum(spec[:,int(scale[i]):], axis=1)
+        else:
+            newspec[:,i] = np.sum(spec[:,int(scale[i]):int(scale[i+1])], axis=1)
+
+    # list center freq of bins
+    allfreqs = np.abs(np.fft.fftfreq(freqbins*2, 1./sr)[:freqbins+1])
+    freqs = []
+    for i in range(0, len(scale)):
+        if i == len(scale)-1:
+            freqs += [np.mean(allfreqs[int(scale[i]):])]
+        else:
+            freqs += [np.mean(allfreqs[int(scale[i]):int(scale[i+1])])]
+
+    return newspec, freqs
+
+""" plot spectrogram"""
+def plotstft(audiopath, binsize=2**13, plotpath=None, colormap="jet"):
+    samplerate, samples = wav.read(audiopath) #sample rate and samples from wav
+
+    s = stft(samples, binsize) #stft from samples and binsize for time
+
+    sshow, freq = logscale_spec(s, factor=1.0, sr=samplerate)
+
+    ims = np.abs(sshow)
+    #ims = 20.*np.log10(np.abs(sshow/10e-6)) # amplitude to decibel
+    maxi = np.max(ims)
+    mini = np.min(ims)
+    SNR = (maxi-mini)/6                                                                        #SNR
+    timebins, freqbins = np.shape(ims)
+
+    freq_res = samplerate/freqbins/2
+    time_res = samples.shape[0]/samplerate/timebins
+
+    print("timebins: ", timebins)
+    print("freqbins: ", freqbins)
+    print("Freq resolution: ", freq_res, "[Hz]")
+    print("Time resolution: ", time_res, "[s]")
+
+    plt.figure(figsize=(15, 7.5))
+    plt.imshow(np.transpose(np.abs(sshow)), origin="lower", aspect="auto", cmap=colormap, interpolation="none")
+    plt.colorbar()
+
+    plt.xlabel("time (s)")
+    plt.ylabel("frequency (hz)")
+    plt.xlim([0, timebins-1])
+    ylim = freqbins * 2 * 1000 / samplerate
+    plt.ylim([0, ylim])
+    #plt.ylim([0, freqbins])
+
+    xlocs = np.float32(np.linspace(0, timebins-1, 5))
+    plt.xticks(xlocs, ["%.02f" % l for l in ((xlocs*len(samples)/timebins)+(0.5*binsize))/samplerate])
+    ylocs = np.int16(np.round(np.linspace(0, ylim-1, 10)))
+    plt.yticks(ylocs, ["%.02f" % freq[i] for i in ylocs])
+
+    if plotpath:
+        plt.savefig(plotpath, bbox_inches="tight")
+    #else:
+        #plt.show()
+
+    #plt.clf()
+
+    return ims, binsize, freq, samplerate, samples, freq_res, SNR
+
+
+def traces(stft, freq, SNR, samplerate, samples, binsize=2**13):
+
+    timebins, freqbins = np.shape(stft)
+
+    tab = np.full((freqbins, timebins), np.NINF)
+    ims = np.transpose(stft)
+
+    for i in range(0, len(ims[:][0])):
+        peaks, _ = find_peaks(ims[:, i], height=SNR)
+        for j in range(0, len(peaks)):
+            tab[peaks[j], i] = ims[peaks[j], i]
+
+    plt.figure(figsize=(15, 7.5))
+    plt.imshow(tab, origin="lower", aspect="auto", cmap="jet", interpolation="none")
+    plt.colorbar()
+
+    plt.xlabel("time (s)")
+    plt.ylabel("frequency (hz)")
+    plt.xlim([0, timebins - 1])
+    ylim = freqbins * 2 * 1000 / samplerate
+    plt.ylim([0, ylim])
+    #plt.ylim([0, freqbins])
+
+    xlocs = np.float32(np.linspace(0, timebins - 1, 5))
+    plt.xticks(xlocs, ["%.02f" % l for l in ((xlocs * len(samples) / timebins) + (0.5 * binsize)) / samplerate])
+    ylocs = np.int16(np.round(np.linspace(0, ylim - 1, 10)))
+    plt.yticks(ylocs, ["%.02f" % freq[i] for i in ylocs])
+    plt.show()
+    plt.clf()
+
+    #np.savetxt('freqval.txt', tab)
+    #np.savetxt('ims.txt', ims)
+
+    return tab
+
+def filemon(tab):
+
+    time_size, freq_size = np.shape(tab)
+
+    midi_tab = np.full((time_size, freq_size), 0)
+    freq_tab = np.full((time_size, freq_size), 0)
+
+    new_freq_tab = []
+    new_midi_tab = []
+
+    for i in range(0, len(tab[:][0])):
+        for j in range(0, len(tab)):
+            if tab[j][i] != np.NINF:
+                midi_tab[j][i] = tab[j][i]
+                freq_tab[j][i] = freq_res*j
+
+    for i in range(len(midi_tab)):
+        if np.sum(midi_tab[:][i]) != 0:
+            new_midi_tab.append(midi_tab[:][i])
+            new_freq_tab.append(freq_tab[:][i])
+
+    np.savetxt('onlygain.txt', new_midi_tab)
+    #np.savetxt('onlyfreqs.txt', new_freq_tab)
+
+    return new_midi_tab, new_freq_tab
+
+def freq_extrude(tab):
+
+
+    time_size, freq_size = np.shape(tab)
+    freq_tab_opt = np.full((time_size, freq_size), 0)
+
+    nuty = [0, 82.41, 87.31, 92.5, 98, 103.83, 110, 116.54, 123.47, 130.81, 138.59, 146.83, 155.56, 164.81, 174.61, 185,
+            196, 207.65, 220, 233.08, 246.94, 261.63, 277.18, 293.66, 311.13, 329.63, 349.23, 369.99, 392, 415.3, 440,
+            466.16, 493.88, 523.25, 554.37, 587.33, 622.25, 659.26, 698.46, 739.99, 783.99, 830.61, 880, 932.33, 987.77,
+            1046.5, 1108.73, 1174.66, 1244.51, 1318.51, 1396.91, 1479.98, 1567.98]  
+
+    for i in range(len(tab)):
+        for j in range(0, len(tab[:][0])):
+            if tab[i][j] != 0:
+                absolute_difference_function = lambda list_value: abs(list_value - tab[i][j])
+                closest_value = min(nuty, key=absolute_difference_function)
+                freq_tab_opt[i][j] = closest_value
+
+    np.savetxt('onlyfreqs_opt.txt', freq_tab_opt)
+    return freq_tab_opt
+
+
+def freqtomidi(fInHz, fA4InHz=440):
+    midi = np.asarray(fInHz)
+    for i in range(0, len(fInHz)):
+        for j in range(0, len(fInHz[:][0])):
+            if fInHz[i][j] == 0:
+                midi[i][j] = 0
+            else:
+                midi[i][j] = 70 + 12 * np.log2(fInHz[i][j] / fA4InHz)
+    np.savetxt('MIDI_tab.txt', midi)
+    return midi
+
+if __name__ == "__main__":
+
+    ims, binsize, freq, samplerate, samples, freq_res, SNR = plotstft("piano_vol2.wav")
+    freqs = traces(ims, freq, SNR, samplerate, samples)
+
+    gain_tab, freq_tab = filemon(freqs)
+    freq_tab_opt = freq_extrude(freq_tab)
+    MIDI_tab = freqtomidi(freq_tab_opt)
+
+
+
+
